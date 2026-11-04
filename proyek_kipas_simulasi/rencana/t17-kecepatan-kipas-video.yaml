@@ -1,0 +1,28 @@
+experiment:
+  name: "T17 - Taksiran Kecepatan Kipas dari Video"
+  repetitions: 20
+
+fan:
+  # Label PWM hanya sah jika nilai ini benar-benar diterapkan oleh pengendali kompatibel.
+  pwm_values: [0, 32, 64, 96, 128, 160, 192, 224, 255]
+
+light:
+  # Level kendali lampu eksperimen, bukan lampu ruangan.
+  levels: [128, 255]
+
+capture:
+  recording_seconds: 5
+  discard_first_seconds: 1
+  fps: 10
+
+simulation:
+  # 360 * (5 + 0.5) = 1.980 detik = 33 menit.
+  transition_seconds: 0.5
+
+session:
+  room_light_state: "belum ditentukan"
+  notes: "Catat kondisi lampu ruangan: mati atau menyala."
+
+output:
+  root: "data/simulasi"
+  session_prefix: "t17"
