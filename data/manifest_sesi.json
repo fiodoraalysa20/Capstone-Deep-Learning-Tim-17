@@ -1,0 +1,39 @@
+{
+  "versi_perekam": "1.8",
+  "tim": 0,
+  "judul": "Program harian meja (rekaman dasar)",
+  "simulasi": false,
+  "dibuat": "2026-11-13T22:39:04.446",
+  "host": "sditera-civ",
+  "python": "3.12.3",
+  "berkas": {
+    "aktuator.csv": {
+      "sha256": "662c6db07a238368beb653144f9e1992bff8173a71a3fb619df4f923a4d4b402",
+      "bytes": 271
+    },
+    "daya.csv": {
+      "sha256": "2c4a84aedd2afe0e8b9d0fe5157b41df2f91c8de825d73b8b3076fcc21e465fe",
+      "bytes": 1301766
+    },
+    "digital.csv": {
+      "sha256": "29a4113bb9b714ef297022123c0e24ef886428d81d39c7920c1f2d81e5ca25bd",
+      "bytes": 28
+    },
+    "imu.csv": {
+      "sha256": "00d28a3a722758a3ed07b06ad4af878e62e60d5f5690e19454c24dab32e29f40",
+      "bytes": 3267841
+    },
+    "lingkungan.csv": {
+      "sha256": "20cd5ca9b2459d2fd5039e7705c42ce7d0b887acb2be0891ce5c4fb3ea4f2564",
+      "bytes": 6422
+    },
+    "log.txt": {
+      "sha256": "a135cbcfe64188eaa6c7d60a76ff848eb6a2015e544cbf602078098749139871",
+      "bytes": 283
+    },
+    "rencana.yaml": {
+      "sha256": "c75b980d3a854e1b733868178c4ce3751429073c6e9b31319a2bb33ac2d158fb",
+      "bytes": 407
+    }
+  }
+}

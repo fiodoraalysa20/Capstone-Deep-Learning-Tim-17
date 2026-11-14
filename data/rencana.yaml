@@ -1,0 +1,27 @@
+tim: 0
+judul: Program harian meja (rekaman dasar)
+faktor: {}
+aturan:
+  lampu_jam:
+  - 8
+  - 16
+  lampu_nilai: 255
+  kipas_ambang_suhu: 29.0
+  kipas_nilai: 200
+  pompa_setiap_menit: 120
+  pompa_selama_detik: 30
+  pompa_nilai: 200
+  buzzer_jam:
+  - 12
+  seed: 2026
+  selalu_nyala:
+  - lampu
+  - kipas
+  - pompa
+  lampu_lux: false
+  ambang_lux: 10.0
+rekam:
+  audio:
+    aktif: false
+  kamera:
+    aktif: false
