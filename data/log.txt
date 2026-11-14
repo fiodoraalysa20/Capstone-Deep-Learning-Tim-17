@@ -1,0 +1,4 @@
+2026-11-13T22:36:31.704  Sesi /home/sditeraciv/meja-uji-5v/data/tim00/sesi-20261113-223631 | tim 0 | Program harian meja (rekaman dasar) | simulasi=False
+2026-11-13T22:36:31.727  ESP32 lewat Wi-Fi: tcp://192.168.1.102:3333
+2026-11-13T22:36:31.830  Jam ESP32 tersinkron (RTT 11.9 ms)
+2026-11-13T22:39:04.447  Selesai. Data di /home/sditeraciv/meja-uji-5v/data/tim00/sesi-20261113-223631
