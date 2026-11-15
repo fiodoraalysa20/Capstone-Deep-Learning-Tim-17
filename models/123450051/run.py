@@ -1,62 +1,103 @@
-import sys
+﻿import argparse
 import os
-import argparse
+import subprocess
+import sys
+import time
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import TensorDataset, DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 from src.protokol import data
 
-class KipasCNN(nn.Module):
-    def __init__(self):
-        super(KipasCNN, self).__init__()
-        self.conv1 = nn.Conv2d(30, 16, kernel_size=3, padding=1)
-        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.fc = nn.Linear(16 * 32 * 32, 1)
 
-    def forward(self, x):
-        x = self.pool(torch.relu(self.conv1(x)))
-        x = x.view(x.size(0), -1)
-        x = self.fc(x)
-        return x
+class SensorCNN1D(nn.Module):
+    def __init__(self, n_fitur: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv1d(1, 16, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(16, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool1d(4),
+            nn.Flatten(),
+            nn.Linear(32 * 4, 32),
+            nn.ReLU(),
+            nn.Linear(32, 1),
+        )
 
-def main():
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x).squeeze(-1)
+
+
+def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument('--seed', type=int, required=True)
+    parser.add_argument("--seed", type=int, default=2026)
+    parser.add_argument("--epochs", type=int, default=80)
+    parser.add_argument("--lr", type=float, default=1e-3)
     args = parser.parse_args()
+
     torch.manual_seed(args.seed)
-    
-    # 1. Terima 6 keluaran dari data.muat()
-    X_train, y_train, X_val, y_val, X_test, y_test = data.muat() 
-    
-    # 2. Ubah data Validasi menjadi DataLoader PyTorch
-    tensor_X_val = torch.from_numpy(X_val)
-    tensor_y_val = torch.from_numpy(y_val)
-    val_loader = DataLoader(TensorDataset(tensor_X_val, tensor_y_val), batch_size=8)
-    
-    # 3. Prediksi
-    model = KipasCNN()
+    np.random.seed(args.seed)
+    t0 = time.time()
+
+    X_train, y_train, X_val, y_val, _, _ = data.muat()
+
+    mu = X_train.mean(axis=0, keepdims=True)
+    sd = X_train.std(axis=0, keepdims=True) + 1e-6
+    X_train_norm = ((X_train - mu) / sd)[:, None, :]
+    X_val_norm = ((X_val - mu) / sd)[:, None, :]
+
+    train_ds = TensorDataset(
+        torch.tensor(X_train_norm, dtype=torch.float32),
+        torch.tensor(y_train, dtype=torch.float32),
+    )
+    train_loader = DataLoader(train_ds, batch_size=16, shuffle=True)
+
+    model = SensorCNN1D(n_fitur=X_train.shape[1])
+    criterion = nn.L1Loss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+
+    model.train()
+    for _ in range(args.epochs):
+        for bx, by in train_loader:
+            optimizer.zero_grad()
+            loss = criterion(model(bx), by)
+            loss.backward()
+            optimizer.step()
+
     model.eval()
-    prediksi_val = []
-    
-    print("Melakukan prediksi pada data validasi...")
     with torch.no_grad():
-        for inputs, targets in val_loader:
-            outputs = model(inputs)
-            prediksi_val.append(outputs.numpy())
-            
-    prediksi_val = np.concatenate(prediksi_val, axis=0)
+        pred_val = model(torch.tensor(X_val_norm, dtype=torch.float32)).numpy()
 
-    # 4. Simpan numpy array
-    folder_output = f"results/123450051"
+    durasi = time.time() - t0
+    folder_output = os.path.join("results", "123450051")
     os.makedirs(folder_output, exist_ok=True)
-    file_output = f"{folder_output}/pred_val.npy"
-    
-    np.save(file_output, prediksi_val)
-    print(f"Prediksi berhasil disimpan di {file_output}")
-    print("Selesai! Silakan jalankan skrip evaluate.py")
+    file_pred = os.path.join(folder_output, "pred_val.npy")
+    np.save(file_pred, pred_val)
 
-if __name__ == '__main__':
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "src.common.evaluate",
+            "--nim",
+            "123450051",
+            "--model",
+            "cnn",
+            "--seed",
+            str(args.seed),
+            "--pred-val",
+            file_pred,
+            "--durasi",
+            f"{durasi:.1f}",
+            "--perangkat",
+            "cpu laptop",
+        ],
+        check=True,
+    )
+
+
+if __name__ == "__main__":
     main()
