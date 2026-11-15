@@ -1,5 +1,15 @@
 {
-  "sumber": "https://… (tautan dataset dari kartu Kasus tim di Workbench)",
-  "berkas": ["data/latih.csv"],
-  "catatan": "Isi pada Sprint 0: versi/tanggal unduh, jumlah baris, dan perubahan (bila ada). Berkas data sendiri tidak di-commit."
+  "sumber": "Program harian meja (rekaman dasar) - host sditera-civ (dibuat 2026-11-13T22:39:04.446, versi_perekam 1.8, tim 0)",
+  "data_hash": "944ea9407b6856044eb5b87e085d8831c7f1ae465a5b1ba4d7eb4b4f7f632431",
+  "berkas": [
+    "data/aktuator.csv",
+    "data/daya.csv",
+    "data/digital.csv",
+    "data/imu.csv",
+    "data/lingkungan.csv",
+    "data/log.txt",
+    "data/rencana.yaml",
+    "data/manifest_sesi.json"
+  ],
+  "catatan": "Paket zip awal berisi 5 CSV sensor, log.txt, rencana.yaml, dan manifest_sesi.json (tercatat tim: 0). Berkas label.csv, kamera_index.csv, audio, dan citra belum terdapat pada paket ini dan dicatat di data/CATATAN-SESI.md."
 }
