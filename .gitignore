@@ -1,6 +1,9 @@
 # dataset kasus tim tidak di-commit; hanya manifesnya
 data/*
 !data/MANIFEST.json
+!data/CATATAN-SESI.md
+!data/manifest_sesi.json
+!data/rencana.yaml
 *.pt
 *.pth
 *.ckpt
