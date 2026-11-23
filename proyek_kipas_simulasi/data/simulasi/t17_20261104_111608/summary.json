@@ -1,0 +1,29 @@
+{
+  "mode": "SIMULASI",
+  "total_conditions": 360,
+  "pwm_values": [
+    0,
+    32,
+    64,
+    96,
+    128,
+    160,
+    192,
+    224,
+    255
+  ],
+  "light_levels": [
+    128,
+    255
+  ],
+  "repetitions": 20,
+  "recording_seconds": 5.0,
+  "discard_first_seconds": 1.0,
+  "usable_seconds": 4.0,
+  "fps": 10.0,
+  "transition_seconds": 0.5,
+  "estimated_duration_seconds": 1980.0,
+  "estimated_duration_minutes": 33.0,
+  "room_light_state": "belum ditentukan",
+  "warning": "Tidak mengendalikan hardware dan tidak merekam video."
+}
