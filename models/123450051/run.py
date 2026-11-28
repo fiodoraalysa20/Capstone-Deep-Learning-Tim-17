@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import os
 import subprocess
 import sys
@@ -54,9 +54,11 @@ class VideoKipasCNN3D(nn.Module):
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=1)
-    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--final", action="store_true", help="evaluasi data uji sekali")
+    parser.add_argument("--perangkat", default="cpu laptop")
     parser.add_argument("--sesi-dir", type=str, default=None, help="Opsional: folder sesi simulasi")
     parser.add_argument("--tanpa-evaluate", action="store_true", help="Lewati penulisan metrics.json saat uji simulasi")
     args = parser.parse_args()
@@ -92,11 +94,11 @@ def main() -> None:
     model.eval()
     with torch.no_grad():
         pred_val = model(torch.tensor(X_val, dtype=torch.float32)).numpy()
+        pred_test = None
+        if args.final and X_test is not None:
+            pred_test = model(torch.tensor(X_test, dtype=torch.float32)).numpy()
 
     assert pred_val.shape == y_val.shape, f"Ukuran keluaran {pred_val.shape} != {y_val.shape}"
-    print(f"[CNN] Masukan X_train: {X_train.shape} | y_train: {y_train.shape}")
-    print(f"[CNN] Masukan X_val  : {X_val.shape} | Keluaran pred_val: {pred_val.shape}")
-    print(f"[CNN] Masukan X_test : {X_test.shape} | y_test: {y_test.shape}")
 
     durasi = time.time() - t0
     if not args.tanpa_evaluate:
@@ -105,26 +107,29 @@ def main() -> None:
         file_pred = os.path.join(folder_output, "pred_val.npy")
         np.save(file_pred, pred_val)
 
-        subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "src.common.evaluate",
-                "--nim",
-                "123450051",
-                "--model",
-                "cnn",
-                "--seed",
-                str(args.seed),
-                "--pred-val",
-                file_pred,
-                "--durasi",
-                f"{durasi:.1f}",
-                "--perangkat",
-                "cpu laptop",
-            ],
-            check=True,
-        )
+        cmd = [
+            sys.executable,
+            "-m",
+            "src.common.evaluate",
+            "--nim",
+            "123450051",
+            "--model",
+            "cnn",
+            "--seed",
+            str(args.seed),
+            "--pred-val",
+            file_pred,
+            "--durasi",
+            f"{durasi:.1f}",
+            "--perangkat",
+            args.perangkat,
+        ]
+        if pred_test is not None:
+            file_pred_test = os.path.join(folder_output, "pred_test.npy")
+            np.save(file_pred_test, pred_test)
+            cmd.extend(["--pred-test", file_pred_test])
+
+        subprocess.run(cmd, check=True)
 
 
 if __name__ == "__main__":

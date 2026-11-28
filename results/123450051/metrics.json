@@ -1,7 +1,7 @@
 {
   "metrik": {
-    "val_rmse": 9.804034,
-    "val_mae": 7.862629,
+    "val_rmse": 16.809394,
+    "val_mae": 10.436668,
     "val_r2": 0.0
   },
   "seed": 1,
@@ -10,5 +10,5 @@
   "model": "cnn",
   "n_val": 25,
   "n_test": 0,
-  "durasi_detik": 23.5
+  "durasi_detik": 10.0
 }

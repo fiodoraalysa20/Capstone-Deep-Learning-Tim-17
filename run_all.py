@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -31,7 +32,7 @@ def main() -> None:
     a = ap.parse_args()
 
     if not a.tanpa_baseline:
-        jalankan([sys.executable, "-m", "src.common.baseline_mlp", "--seed", str(a.seeds[0])])
+        jalankan([sys.executable, "-m", "src.common.baseline", "--seed", str(a.seeds[0])])
     anggota = sorted(p for p in (AKAR / "models").iterdir() if p.is_dir() and (p / "run.py").exists()
                      and p.name != "TEMPLATE" and (a.hanya is None or p.name in a.hanya))
     ringkas: dict[str, list[dict]] = {}
@@ -44,16 +45,23 @@ def main() -> None:
             hasil = json.loads((AKAR / "results" / m.name / "metrics.json").read_text("utf-8"))
             ringkas.setdefault(m.name, []).append(hasil)
 
-    baris = ["| NIM | Model | seed | val_acc | val_macro_f1 | test_acc | durasi (s) | perangkat |", "|---|---|---|---|---|---|---|---|"]
+    sys.path.insert(0, str(AKAR))
+    from src.protokol import data
+
+    regresi = getattr(data, "TUGAS", "klasifikasi") == "regresi"
+    k1, k2 = ("val_rmse", "val_mae") if regresi else ("val_acc", "val_macro_f1")
+    baris = [f"| NIM | Model | seed | {k1} | {k2} | test_score | durasi (s) | perangkat |", "|---|---|---|---|---|---|---|---|"]
     bl = AKAR / "results" / "baseline" / "metrics.json"
     if bl.exists():
         h = json.loads(bl.read_text("utf-8")); mt = h["metrik"]
-        baris.append(f"| baseline | mlp dosen | {h['seed']} | {mt['val_acc']:.4f} | {mt['val_macro_f1']:.4f} | — | {h.get('durasi_detik', 0):.0f} | {h.get('perangkat', '')} |")
+        baris.append(f"| baseline | baseline starter | {h['seed']} | {mt.get(k1, float('nan')):.4f} | {mt.get(k2, float('nan')):.4f} | — | {h.get('durasi_detik', 0):.0f} | {h.get('perangkat', '')} |")
     for nim, daftar in ringkas.items():
         for h in daftar:
             mt = h["metrik"]
-            baris.append(f"| {nim} | {h.get('model', '')} | {h['seed']} | {mt['val_acc']:.4f} | {mt['val_macro_f1']:.4f} | "
-                         f"{mt.get('test_acc', float('nan')):.4f} | {h.get('durasi_detik', 0):.0f} | {h.get('perangkat', '')} |")
+            test_val = mt.get("test_rmse" if regresi else "test_acc", float("nan"))
+            test_str = f"{test_val:.4f}" if not (isinstance(test_val, float) and math.isnan(test_val)) else "—"
+            baris.append(f"| {nim} | {h.get('model', '')} | {h['seed']} | {mt.get(k1, float('nan')):.4f} | {mt.get(k2, float('nan')):.4f} | "
+                         f"{test_str} | {h.get('durasi_detik', 0):.0f} | {h.get('perangkat', '')} |")
     (AKAR / "reports").mkdir(exist_ok=True)
     out = AKAR / "reports" / "hasil_komparasi.md"
     out.write_text("# Hasil komparasi (dibangkitkan run_all.py)\n\n" + "\n".join(baris) + "\n", encoding="utf-8")
