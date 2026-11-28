@@ -1,0 +1,41 @@
+tim: 17
+judul: Taksiran kecepatan kipas dari video
+pembimbing: Ade Lailani
+pilar: Citra
+seed: 1017
+ulangan: 20
+durasi_kondisi_detik: 5
+jeda_detik: 0.5
+rekam:
+  audio:
+    aktif: false
+  kamera:
+    aktif: true
+    interval_detik: 0.1
+    lebar: 640
+    tinggi: 480
+faktor:
+  kipas:
+  - 0
+  - 32
+  - 64
+  - 96
+  - 128
+  - 160
+  - 192
+  - 224
+  - 255
+  lampu:
+  - 0
+  - 255
+metode:
+  jenis_tugas: Regresi
+  masukan_model: Urutan 10 frame (10 fps)
+  metrik_utama: MAE (% duty)
+  jalur:
+  - CNN
+  - TL
+  - RNN
+  - AE
+  pembanding_non_dl: Energi beda-frame + regresi linear
+sidik_susunan: eb75c28fbb1782b7
