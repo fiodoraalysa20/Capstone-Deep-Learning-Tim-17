@@ -12,50 +12,72 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")
 from src.protokol import data
 
 
-class SensorCNN1D(nn.Module):
-    def __init__(self, n_fitur: int):
+class VideoKipasCNN3D(nn.Module):
+    """Arsitektur Spatio-Temporal 3D-CNN untuk urutan 10 frame citra kipas (B, 1, 10, 64, 64)."""
+
+    def __init__(self, fitur_primer_dim: int | None = None):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv1d(1, 16, kernel_size=3, padding=1),
+        self.proyeksi_primer = (
+            nn.Linear(fitur_primer_dim, 10 * 16 * 16)
+            if fitur_primer_dim is not None
+            else None
+        )
+        self.conv3d = nn.Sequential(
+            nn.Conv3d(1, 16, kernel_size=(3, 3, 3), padding=1),
             nn.ReLU(),
-            nn.Conv1d(16, 32, kernel_size=3, padding=1),
+            nn.MaxPool3d(kernel_size=(1, 2, 2)),
+            nn.Conv3d(16, 32, kernel_size=(3, 3, 3), padding=1),
             nn.ReLU(),
-            nn.AdaptiveAvgPool1d(4),
+            nn.MaxPool3d(kernel_size=(2, 2, 2)),
+            nn.Conv3d(32, 64, kernel_size=(3, 3, 3), padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool3d((1, 1, 1)),
+        )
+        self.head = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(32 * 4, 32),
+            nn.Linear(64, 32),
             nn.ReLU(),
             nn.Linear(32, 1),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x).squeeze(-1)
+        if x.ndim == 4:
+            # Masukan langsung urutan 10 frame citra: (B, 10, 64, 64) -> (B, 1, 10, 64, 64)
+            v = x.unsqueeze(1)
+        elif x.ndim == 2 and self.proyeksi_primer is not None:
+            v = self.proyeksi_primer(x).view(x.size(0), 1, 10, 16, 16)
+        else:
+            raise ValueError(f"Bentuk masukan tidak didukung: {tuple(x.shape)}")
+        return self.head(self.conv3d(v)).squeeze(-1)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--seed", type=int, default=2026)
-    parser.add_argument("--epochs", type=int, default=80)
+    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--sesi-dir", type=str, default=None, help="Opsional: folder sesi simulasi")
+    parser.add_argument("--tanpa-evaluate", action="store_true", help="Lewati penulisan metrics.json saat uji simulasi")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     t0 = time.time()
 
-    X_train, y_train, X_val, y_val, _, _ = data.muat()
+    X_train, y_train, X_val, y_val, X_test, y_test = data.muat(args.sesi_dir)
+    dim_primer = X_train.shape[1] if X_train.ndim == 2 else None
 
-    mu = X_train.mean(axis=0, keepdims=True)
-    sd = X_train.std(axis=0, keepdims=True) + 1e-6
-    X_train_norm = ((X_train - mu) / sd)[:, None, :]
-    X_val_norm = ((X_val - mu) / sd)[:, None, :]
-
-    train_ds = TensorDataset(
-        torch.tensor(X_train_norm, dtype=torch.float32),
-        torch.tensor(y_train, dtype=torch.float32),
+    model = VideoKipasCNN3D(fitur_primer_dim=dim_primer)
+    train_loader = DataLoader(
+        TensorDataset(
+            torch.tensor(X_train, dtype=torch.float32),
+            torch.tensor(y_train, dtype=torch.float32),
+        ),
+        batch_size=args.batch_size,
+        shuffle=True,
     )
-    train_loader = DataLoader(train_ds, batch_size=16, shuffle=True)
 
-    model = SensorCNN1D(n_fitur=X_train.shape[1])
     criterion = nn.L1Loss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
@@ -69,34 +91,40 @@ def main() -> None:
 
     model.eval()
     with torch.no_grad():
-        pred_val = model(torch.tensor(X_val_norm, dtype=torch.float32)).numpy()
+        pred_val = model(torch.tensor(X_val, dtype=torch.float32)).numpy()
+
+    assert pred_val.shape == y_val.shape, f"Ukuran keluaran {pred_val.shape} != {y_val.shape}"
+    print(f"[CNN] Masukan X_train: {X_train.shape} | y_train: {y_train.shape}")
+    print(f"[CNN] Masukan X_val  : {X_val.shape} | Keluaran pred_val: {pred_val.shape}")
+    print(f"[CNN] Masukan X_test : {X_test.shape} | y_test: {y_test.shape}")
 
     durasi = time.time() - t0
-    folder_output = os.path.join("results", "123450051")
-    os.makedirs(folder_output, exist_ok=True)
-    file_pred = os.path.join(folder_output, "pred_val.npy")
-    np.save(file_pred, pred_val)
+    if not args.tanpa_evaluate:
+        folder_output = os.path.join("results", "123450051")
+        os.makedirs(folder_output, exist_ok=True)
+        file_pred = os.path.join(folder_output, "pred_val.npy")
+        np.save(file_pred, pred_val)
 
-    subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "src.common.evaluate",
-            "--nim",
-            "123450051",
-            "--model",
-            "cnn",
-            "--seed",
-            str(args.seed),
-            "--pred-val",
-            file_pred,
-            "--durasi",
-            f"{durasi:.1f}",
-            "--perangkat",
-            "cpu laptop",
-        ],
-        check=True,
-    )
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "src.common.evaluate",
+                "--nim",
+                "123450051",
+                "--model",
+                "cnn",
+                "--seed",
+                str(args.seed),
+                "--pred-val",
+                file_pred,
+                "--durasi",
+                f"{durasi:.1f}",
+                "--perangkat",
+                "cpu laptop",
+            ],
+            check=True,
+        )
 
 
 if __name__ == "__main__":

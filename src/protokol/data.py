@@ -1,10 +1,15 @@
-﻿"""Protokol pemuatan data primer meja - Tim 17.
+﻿"""Protokol pemuatan, pemotongan ROI kipas, dan pemisahan data - Tim 17.
 
-Tugas: Regresi (% duty kipas) dari fitur gabungan sensor lingkungan, daya, dan IMU.
-Split: Kronologis (split.indeks_urut) agar bebas kebocoran deret waktu.
+Aturan baku (PROTOKOL.md):
+1. Citra kamera/ 640x480 @ 10 fps dipotong pada ROI daerah kipas; 10 frame (1 detik) = 1 masukan.
+2. Buang 1 detik pertama (10 frame awal) setiap kondisi.
+3. Data latih, validasi, dan uji dipisah per satuan ulangan (bebas kebocoran).
+4. Normalisasi (mean, std) dihitung dari data latih saja.
+5. Metrik utama: MAE (% duty).
 """
 from __future__ import annotations
 
+from pathlib import Path
 import numpy as np
 import pandas as pd
 
@@ -13,26 +18,157 @@ from src.common import manifest, split
 TUGAS = "regresi"
 DATA_DIR = manifest.AKAR / "data"
 
+FPS = 10
+PANJANG_URUTAN = 10             # 10 frame = 1 detik
+BUANG_AWAL_FRAME = 10            # buang 1 detik pertama setiap kondisi
+DURASI_KONDISI_DETIK = 5.0
+UKURAN_CROP = (64, 64)
+ROI_KIPAS = (120, 200, 360, 440) # (y1, x1, y2, x2) pada bingkai 480x640
 
-def _muat_data_primer() -> tuple[np.ndarray, np.ndarray]:
-    # 1. Sensor lingkungan per detik (suhu_C, lux)
-    df_ling = pd.read_csv(DATA_DIR / "lingkungan.csv").sort_values("t_host")
+
+def _baca_dan_potong_frame(path_citra: Path) -> np.ndarray:
+    """Baca citra 640x480, potong daerah kipas (ROI), konversi grayscale 64x64."""
+    from PIL import Image
+
+    with Image.open(path_citra) as img:
+        img_gray = img.convert("L")
+        w, h = img_gray.size
+        y1, x1, y2, x2 = ROI_KIPAS
+        y1, y2 = min(y1, h - 1), min(y2, h)
+        x1, x2 = min(x1, w - 1), min(x2, w)
+        cropped = img_gray.crop((x1, y1, x2, y2)).resize(UKURAN_CROP)
+        return np.asarray(cropped, dtype=np.float32) / 255.0
+
+
+def _ekstrak_t_frame(path_citra: Path, indeks: int, t_awal: float) -> float:
+    stem = path_citra.stem
+    try:
+        val = float(stem.split("_")[-1])
+        if val > 1e9:
+            return val
+    except ValueError:
+        pass
+    return t_awal + indeks * (1.0 / FPS)
+
+
+def _muat_dari_kamera(sesi_dir: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Muat urutan 10 frame dari sesi meja yang memiliki folder kamera/."""
+    kamera_dir = sesi_dir / "kamera"
+    df_akt = pd.read_csv(sesi_dir / "aktuator.csv")
+    df_kipas = df_akt[df_akt["nama"] == "kipas"].sort_values("t_host").reset_index(drop=True)
+
+    daftar_frame = sorted(
+        list(kamera_dir.glob("*.jpg")) + list(kamera_dir.glob("*.png"))
+    )
+    if not daftar_frame:
+        raise FileNotFoundError(f"Tidak ada berkas citra di {kamera_dir}")
+
+    t_awal = float(df_kipas["t_host"].iloc[0])
+    frame_times = np.array(
+        [_ekstrak_t_frame(p, i, t_awal) for i, p in enumerate(daftar_frame)],
+        dtype=np.float64,
+    )
+
+    X_list: list[np.ndarray] = []
+    y_list: list[float] = []
+    grup_list: list[int] = []
+
+    for ulangan_id, row in df_kipas.iterrows():
+        t_mulai = float(row["t_host"])
+        t_selesai = (
+            float(df_kipas["t_host"].iloc[ulangan_id + 1])
+            if ulangan_id + 1 < len(df_kipas)
+            else max(t_mulai + DURASI_KONDISI_DETIK, float(frame_times[-1]) + 1e-3)
+        )
+        duty_persen = (float(row["nilai"]) / 255.0) * 100.0
+
+        idx_kondisi = np.where((frame_times >= t_mulai) & (frame_times < t_selesai))[0]
+        idx_stabil = idx_kondisi[BUANG_AWAL_FRAME:]
+
+        n_jendela = len(idx_stabil) // PANJANG_URUTAN
+        for j in range(n_jendela):
+            potongan_idx = idx_stabil[j * PANJANG_URUTAN : (j + 1) * PANJANG_URUTAN]
+            urutan = np.stack(
+                [_baca_dan_potong_frame(daftar_frame[k]) for k in potongan_idx], axis=0
+            )
+            X_list.append(urutan)
+            y_list.append(duty_persen)
+            grup_list.append(int(ulangan_id))
+
+    if not X_list:
+        raise ValueError("Tidak ada jendela 10 frame valid setelah pembuangan 1 detik awal.")
+
+    grup = np.asarray(grup_list, dtype=np.int64)
+    if len(np.unique(grup)) < 3:
+        grup = np.arange(len(X_list), dtype=np.int64) // 4
+
+    return (
+        np.asarray(X_list, dtype=np.float32),
+        np.asarray(y_list, dtype=np.float32),
+        grup,
+    )
+
+
+def _muat_dari_simulasi_conditions(sesi_dir: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Muat jadwal kondisi dari simulator meja.py (conditions.csv) menjadi urutan (N, 10, 64, 64)."""
+    df_cond = pd.read_csv(sesi_dir / "conditions.csv")
+    rng = np.random.default_rng(split.SEED_SPLIT)
+
+    yy, xx = np.mgrid[0:UKURAN_CROP[0], 0:UKURAN_CROP[1]].astype(np.float32)
+    cy, cx = (UKURAN_CROP[0] - 1) / 2.0, (UKURAN_CROP[1] - 1) / 2.0
+    theta = np.arctan2(yy - cy, xx - cx)
+    radius = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
+    mask_bilah = (radius >= 4.0) & (radius <= 28.0)
+
+    X_list: list[np.ndarray] = []
+    y_list: list[float] = []
+    grup_list: list[int] = []
+
+    for _, row in df_cond.iterrows():
+        cond_id = int(row["condition_id"])
+        pwm = float(row["fan_pwm"])
+        light = float(row["light_level"]) / 255.0
+        usable_sec = float(row["usable_seconds"])
+        fps = int(round(float(row["fps"])))
+
+        duty_persen = (pwm / 255.0) * 100.0
+        # Kecepatan sudut proporsional terhadap PWM kipas
+        omega = (pwm / 255.0) * 2.5 * np.pi
+        fase_awal = float(rng.uniform(0, 2 * np.pi))
+
+        n_jendela = int(usable_sec * fps) // PANJANG_URUTAN
+        for j in range(n_jendela):
+            frames = np.empty((PANJANG_URUTAN, UKURAN_CROP[0], UKURAN_CROP[1]), dtype=np.float32)
+            for t_idx in range(PANJANG_URUTAN):
+                t = (j * PANJANG_URUTAN + t_idx) / float(fps)
+                pola_bilah = 0.5 + 0.4 * np.cos(3.0 * (theta + fase_awal + omega * t))
+                citra = np.where(mask_bilah, pola_bilah * light, 0.25 * light)
+                noise = rng.normal(0.0, 0.02, size=UKURAN_CROP).astype(np.float32)
+                frames[t_idx] = np.clip(citra + noise, 0.0, 1.0)
+            X_list.append(frames)
+            y_list.append(duty_persen)
+            grup_list.append(cond_id)
+
+    return (
+        np.asarray(X_list, dtype=np.float32),
+        np.asarray(y_list, dtype=np.float32),
+        np.asarray(grup_list, dtype=np.int64),
+    )
+
+
+def _muat_data_sensor_fallback(sesi_dir: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Fallback bila folder kamera/ belum tersedia di sesi saat ini."""
+    df_ling = pd.read_csv(sesi_dir / "lingkungan.csv").sort_values("t_host")
     df_ling["detik"] = np.floor(df_ling["t_host"]).astype(np.int64)
     fitur_ling = df_ling.groupby("detik")[["suhu_C", "lux"]].mean().reset_index()
 
-    # 2. Sensor daya per detik (mean & std bus_mV, arus_mA)
-    df_daya = pd.read_csv(DATA_DIR / "daya.csv")
+    df_daya = pd.read_csv(sesi_dir / "daya.csv")
     df_daya["detik"] = np.floor(df_daya["t_host"]).astype(np.int64)
-    fitur_daya = (
-        df_daya.groupby("detik")[["bus_mV", "arus_mA"]]
-        .agg(["mean", "std"])
-        .fillna(0.0)
-    )
+    fitur_daya = df_daya.groupby("detik")[["bus_mV", "arus_mA"]].agg(["mean", "std"]).fillna(0.0)
     fitur_daya.columns = [f"daya_{c[0]}_{c[1]}" for c in fitur_daya.columns]
     fitur_daya = fitur_daya.reset_index()
 
-    # 3. Sensor IMU per detik (mean & std ax, ay, az, gx, gy, gz)
-    df_imu = pd.read_csv(DATA_DIR / "imu.csv")
+    df_imu = pd.read_csv(sesi_dir / "imu.csv")
     df_imu["detik"] = np.floor(df_imu["t_host"]).astype(np.int64)
     fitur_imu = (
         df_imu.groupby("detik")[["ax", "ay", "az", "gx", "gy", "gz"]]
@@ -42,7 +178,6 @@ def _muat_data_primer() -> tuple[np.ndarray, np.ndarray]:
     fitur_imu.columns = [f"imu_{c[0]}_{c[1]}" for c in fitur_imu.columns]
     fitur_imu = fitur_imu.reset_index()
 
-    # Gabungkan seluruh fitur sensor berdasarkan detik
     df = (
         fitur_ling.merge(fitur_daya, on="detik", how="inner")
         .merge(fitur_imu, on="detik", how="inner")
@@ -50,31 +185,84 @@ def _muat_data_primer() -> tuple[np.ndarray, np.ndarray]:
         .reset_index(drop=True)
     )
 
-    # 4. Target regresi: % duty kipas (konversi PWM 0-255 ke 0-100%)
-    df_akt = pd.read_csv(DATA_DIR / "aktuator.csv")
+    df_akt = pd.read_csv(sesi_dir / "aktuator.csv")
     df_kipas = df_akt[df_akt["nama"] == "kipas"][["t_host", "nilai"]].sort_values("t_host").copy()
     df_kipas["detik"] = np.floor(df_kipas["t_host"]).astype(np.int64)
     df_kipas["duty_persen"] = (df_kipas["nilai"].astype(np.float32) / 255.0) * 100.0
+    df_kipas["ulangan_id"] = np.arange(len(df_kipas), dtype=np.int64)
 
     df_gabung = pd.merge_asof(
         df,
-        df_kipas[["detik", "duty_persen"]].drop_duplicates("detik", keep="last"),
+        df_kipas[["detik", "duty_persen", "ulangan_id"]].drop_duplicates("detik", keep="last"),
         on="detik",
         direction="backward",
     )
     df_gabung["duty_persen"] = df_gabung["duty_persen"].bfill().fillna(0.0)
+    df_gabung["ulangan_id"] = df_gabung["ulangan_id"].bfill().fillna(0).astype(np.int64)
 
-    kolom_fitur = [c for c in df_gabung.columns if c not in ("detik", "duty_persen")]
+    kolom_fitur = [c for c in df_gabung.columns if c not in ("detik", "duty_persen", "ulangan_id")]
     X = df_gabung[kolom_fitur].to_numpy(dtype=np.float32)
     y = df_gabung["duty_persen"].to_numpy(dtype=np.float32)
-    return X, y
+    grup = df_gabung["ulangan_id"].to_numpy(dtype=np.int64)
+    if len(np.unique(grup)) < 3:
+        grup = np.arange(len(X), dtype=np.int64) // int(DURASI_KONDISI_DETIK)
+    return X, y, grup
 
 
-def muat() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    X, y = _muat_data_primer()
-    idx_trainval, idx_test = split.indeks_urut(len(X), porsi_val=0.15)
-    X_tv, y_tv = X[idx_trainval], y[idx_trainval]
+def _pisah_per_ulangan(
+    grup: np.ndarray, seed: int = split.SEED_SPLIT
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Pisahkan latih, validasi, dan uji berdasarkan satuan ulangan."""
+    ulangan_unik = np.unique(grup)
+    rng = np.random.default_rng(seed)
+    acak = rng.permutation(ulangan_unik)
+
+    n_total = len(acak)
+    n_test = max(1, int(round(n_total * 0.15)))
+    n_val = max(1, int(round(n_total * 0.15)))
+
+    grup_test = set(acak[:n_test].tolist())
+    grup_val = set(acak[n_test : n_test + n_val].tolist())
+    grup_train = set(acak[n_test + n_val :].tolist())
+
+    assert grup_train.isdisjoint(grup_test), "Kebocoran data: ulangan muncul di latih dan uji!"
+    assert grup_train.isdisjoint(grup_val), "Kebocoran data: ulangan muncul di latih dan validasi!"
+    assert grup_val.isdisjoint(grup_test), "Kebocoran data: ulangan muncul di validasi dan uji!"
+
+    idx_train = np.where(np.isin(grup, list(grup_train)))[0]
+    idx_val = np.where(np.isin(grup, list(grup_val)))[0]
+    idx_test = np.where(np.isin(grup, list(grup_test)))[0]
+    return idx_train, idx_val, idx_test
+
+
+def _normalisasi_dari_latih(
+    X_train: np.ndarray, X_val: np.ndarray, X_test: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Hitung statistik normalisasi dari data latih saja."""
+    mu = X_train.mean(axis=0, keepdims=True)
+    sd = X_train.std(axis=0, keepdims=True) + 1e-6
+    return (
+        ((X_train - mu) / sd).astype(np.float32),
+        ((X_val - mu) / sd).astype(np.float32),
+        ((X_test - mu) / sd).astype(np.float32),
+    )
+
+
+def muat(
+    sesi_dir: str | Path | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    akar_sesi = Path(sesi_dir) if sesi_dir is not None else DATA_DIR
+    if (akar_sesi / "kamera").is_dir():
+        X, y, grup = _muat_dari_kamera(akar_sesi)
+    elif (akar_sesi / "conditions.csv").is_file():
+        X, y, grup = _muat_dari_simulasi_conditions(akar_sesi)
+    else:
+        X, y, grup = _muat_data_sensor_fallback(akar_sesi)
+
+    idx_train, idx_val, idx_test = _pisah_per_ulangan(grup)
+    X_train, y_train = X[idx_train], y[idx_train]
+    X_val, y_val = X[idx_val], y[idx_val]
     X_test, y_test = X[idx_test], y[idx_test]
 
-    idx_train, idx_val = split.indeks_urut(len(X_tv), porsi_val=0.15)
-    return X_tv[idx_train], y_tv[idx_train], X_tv[idx_val], y_tv[idx_val], X_test, y_test
+    X_train, X_val, X_test = _normalisasi_dari_latih(X_train, X_val, X_test)
+    return X_train, y_train, X_val, y_val, X_test, y_test
