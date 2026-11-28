@@ -1,14 +1,17 @@
 {
   "metrik": {
-    "val_rmse": 78.213687,
-    "val_mae": 78.213378,
-    "val_r2": 0.0
+    "val_rmse": 38.591497,
+    "val_mae": 29.589761,
+    "val_r2": -0.370697,
+    "test_rmse": 41.223252,
+    "test_mae": 32.263471,
+    "test_r2": -0.499193
   },
   "seed": 1,
   "data_hash": "eb790c5fb3d49a3537b2b9220ba8dbc8",
   "perangkat": "cpu laptop",
   "model": "rnn",
-  "n_val": 25,
-  "n_test": 0,
-  "durasi_detik": 15.4
+  "n_val": 216,
+  "n_test": 216,
+  "durasi_detik": 114.9
 }

@@ -1,93 +1,176 @@
-"""Kerangka run.py anggota: 123450106 (RNN / rnn).
+"""Jalur RNN: Jaringan berulang (GRU / LSTM) atas urutan 10 frame (10 fps).
 
     python models/123450106/run.py --seed 1 [--final]
 """
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
 
 AKAR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(AKAR))
-from src.protokol import data  # noqa: E402  (protokol tim yang dibekukan)
+from src.protokol import data  # noqa: E402
 
-NIM = Path(__file__).resolve().parent.name     # nama folder = NIM
-JALUR = "rnn"                                   # cnn | tl | rnn | trf | ae
+NIM = Path(__file__).resolve().parent.name
+JALUR = "rnn"
 
 
-def latih_dan_prediksi(seed: int, final: bool) -> tuple[np.ndarray, np.ndarray | None]:
-    """Kembalikan (pred_val, pred_test|None)."""
-    import torch
+class VideoKipasRNN(nn.Module):
+    """Model Spatio-Temporal CNN + GRU untuk urutan 10 frame video kipas (B, 10, 64, 64)."""
 
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    Xtr, ytr, Xva, _, Xte, _ = data.muat()
-
-    def ke_tensor(X):
-        return torch.tensor(np.asarray(X, dtype=np.float32)).reshape(len(X), -1)
-
-    tugas = getattr(data, "TUGAS", "klasifikasi")
-    if tugas == "regresi":
-        X = ke_tensor(Xtr)
-        y = torch.tensor(np.asarray(ytr, dtype=np.float32)).unsqueeze(-1)
-        model = torch.nn.Sequential(
-            torch.nn.Linear(X.shape[1], 16),
-            torch.nn.ReLU(),
-            torch.nn.Linear(16, 1),
+    def __init__(self, fitur_primer_dim: int | None = None, hidden_dim: int = 32):
+        super().__init__()
+        self.proyeksi_2d = (
+            nn.Linear(fitur_primer_dim, 10 * 64)
+            if fitur_primer_dim is not None
+            else None
         )
-        opt = torch.optim.Adam(model.parameters(), lr=0.01)
-        loss_fn = torch.nn.L1Loss()
-        for _ in range(5):
-            for i in range(0, len(X), 128):
-                opt.zero_grad()
-                loss = loss_fn(model(X[i:i + 128]), y[i:i + 128])
-                loss.backward()
-                opt.step()
-        model.eval()
-        with torch.no_grad():
-            pred_val = model(ke_tensor(Xva)).squeeze(-1).numpy()
-            pred_test = model(ke_tensor(Xte)).squeeze(-1).numpy() if final and Xte is not None else None
-        return pred_val, pred_test
-    else:
-        X, y = ke_tensor(Xtr), torch.tensor(np.asarray(ytr, dtype=np.int64))
-        model = torch.nn.Sequential(torch.nn.Linear(X.shape[1], 10))
-        opt = torch.optim.SGD(model.parameters(), lr=0.01)
-        for _ in range(2):
-            for i in range(0, len(X), 128):
-                opt.zero_grad()
-                loss = torch.nn.functional.cross_entropy(model(X[i:i + 128]), y[i:i + 128])
-                loss.backward()
-                opt.step()
-        model.eval()
-        with torch.no_grad():
-            pred_val = model(ke_tensor(Xva)).argmax(1).numpy()
-            pred_test = model(ke_tensor(Xte)).argmax(1).numpy() if final and Xte is not None else None
-        return pred_val, pred_test
+        # Ekstraktor fitur spasial per-frame (citra 64x64)
+        self.cnn = nn.Sequential(
+            nn.Conv2d(1, 16, kernel_size=3, padding=1),
+            nn.BatchNorm2d(16),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),  # -> 16 x 32 x 32
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),  # -> 32 x 16 x 16
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((2, 2)),  # -> 64 x 2 x 2 = 256
+            nn.Flatten(),
+            nn.Linear(256, 64),
+            nn.ReLU(),
+        )
+        # Jaringan berulang atas urutan 10 langkah waktu
+        self.rnn = nn.GRU(
+            input_size=64,
+            hidden_size=hidden_dim,
+            num_layers=1,
+            batch_first=True,
+        )
+        # Kepala regresi taksiran % duty kipas (0 - 100%)
+        self.head = nn.Sequential(
+            nn.Linear(hidden_dim, 16),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(16, 1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim == 4:
+            # Masukan urutan 10 frame citra: (B, 10, 64, 64)
+            B, T, H, W = x.shape
+            x_frames = x.view(B * T, 1, H, W)
+            feat = self.cnn(x_frames)         # (B * 10, 64)
+            seq_feat = feat.view(B, T, -1)     # (B, 10, 64)
+        elif x.ndim == 2 and self.proyeksi_2d is not None:
+            B = x.shape[0]
+            seq_feat = self.proyeksi_2d(x).view(B, 10, 64)
+        else:
+            raise ValueError(f"Bentuk masukan tidak didukung: {tuple(x.shape)}")
+
+        out, _ = self.rnn(seq_feat)            # (B, 10, hidden_dim)
+        last_step = out[:, -1, :]              # ambil langkah waktu terakhir (t=10)
+        return self.head(last_step).squeeze(-1) # (B,)
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--seed", type=int, required=True)
-    ap.add_argument("--final", action="store_true", help="sprint terakhir: evaluasi data uji sekali")
-    ap.add_argument("--perangkat", default="cpu laptop")
-    a = ap.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--epochs", type=int, default=5)
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--final", action="store_true", help="evaluasi data uji sekali")
+    parser.add_argument("--perangkat", default="cpu laptop")
+    parser.add_argument("--sesi-dir", type=str, default=None, help="Opsional: folder sesi simulasi")
+    args = parser.parse_args()
+
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
     t0 = time.time()
-    pred_val, pred_test = latih_dan_prediksi(a.seed, a.final)
+
+    X_train, y_train, X_val, y_val, X_test, y_test = data.muat(args.sesi_dir)
+    dim_primer = X_train.shape[1] if X_train.ndim == 2 else None
+
+    print(f"[{JALUR.upper()}] Masukan X_train: {X_train.shape} | y_train: {y_train.shape}")
+    print(f"[{JALUR.upper()}] Masukan X_val  : {X_val.shape} | y_val: {y_val.shape}")
+    print(f"[{JALUR.upper()}] Masukan X_test : {X_test.shape} | y_test: {y_test.shape}")
+
+    model = VideoKipasRNN(fitur_primer_dim=dim_primer, hidden_dim=32)
+    train_loader = DataLoader(
+        TensorDataset(
+            torch.tensor(X_train, dtype=torch.float32),
+            torch.tensor(y_train, dtype=torch.float32),
+        ),
+        batch_size=args.batch_size,
+        shuffle=True,
+    )
+
+    criterion = nn.L1Loss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+
+    model.train()
+    for ep in range(args.epochs):
+        loss_total = 0.0
+        for bx, by in train_loader:
+            optimizer.zero_grad()
+            pred = model(bx)
+            loss = criterion(pred, by)
+            loss.backward()
+            optimizer.step()
+            loss_total += loss.item() * len(by)
+        loss_mean = loss_total / len(y_train)
+
+    model.eval()
+    with torch.no_grad():
+        pred_val = model(torch.tensor(X_val, dtype=torch.float32)).numpy()
+        pred_test = None
+        if args.final and X_test is not None:
+            pred_test = model(torch.tensor(X_test, dtype=torch.float32)).numpy()
+
+    assert pred_val.shape == y_val.shape, f"Ukuran keluaran {pred_val.shape} != {y_val.shape}"
+    print(f"[{JALUR.upper()}] Keluaran pred_val: {pred_val.shape} (sesuai target {y_val.shape})")
+
     durasi = time.time() - t0
-    out = AKAR / "results" / NIM
-    out.mkdir(parents=True, exist_ok=True)
-    np.save(out / "pred_val.npy", np.asarray(pred_val))
-    perintah = [sys.executable, "-m", "src.common.evaluate", "--nim", NIM, "--model", JALUR, "--seed", str(a.seed),
-                "--pred-val", str(out / "pred_val.npy"), "--durasi", f"{durasi:.1f}", "--perangkat", a.perangkat]
+    folder_output = AKAR / "results" / NIM
+    folder_output.mkdir(parents=True, exist_ok=True)
+    file_pred_val = folder_output / "pred_val.npy"
+    np.save(file_pred_val, pred_val)
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "src.common.evaluate",
+        "--nim",
+        NIM,
+        "--model",
+        JALUR,
+        "--seed",
+        str(args.seed),
+        "--pred-val",
+        str(file_pred_val),
+        "--durasi",
+        f"{durasi:.1f}",
+        "--perangkat",
+        args.perangkat,
+    ]
     if pred_test is not None:
-        np.save(out / "pred_test.npy", np.asarray(pred_test))
-        perintah += ["--pred-test", str(out / "pred_test.npy")]
-    subprocess.run(perintah, check=True, cwd=AKAR)
+        file_pred_test = folder_output / "pred_test.npy"
+        np.save(file_pred_test, pred_test)
+        cmd.extend(["--pred-test", str(file_pred_test)])
+
+    subprocess.run(cmd, check=True, cwd=AKAR)
 
 
 if __name__ == "__main__":
