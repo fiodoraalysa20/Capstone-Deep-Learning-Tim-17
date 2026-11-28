@@ -18,12 +18,11 @@ from src.common import manifest, split
 TUGAS = "regresi"
 DATA_DIR = manifest.AKAR / "data"
 
-# Parameter protokol video Tim 17 (t17-kecepatan-kipas-video.yaml)
 FPS = 10
 PANJANG_URUTAN = 10             # 10 frame = 1 detik
 BUANG_AWAL_FRAME = 10            # buang 1 detik pertama setiap kondisi
 DURASI_KONDISI_DETIK = 5.0
-UKURAN_CROP = (64, 64)           # ukuran keluaran setelah crop daerah kipas
+UKURAN_CROP = (64, 64)
 ROI_KIPAS = (120, 200, 360, 440) # (y1, x1, y2, x2) pada bingkai 480x640
 
 
@@ -42,7 +41,6 @@ def _baca_dan_potong_frame(path_citra: Path) -> np.ndarray:
 
 
 def _ekstrak_t_frame(path_citra: Path, indeks: int, t_awal: float) -> float:
-    """Ambil timestamp dari nama berkas (bila numerik) atau fallback 10 fps."""
     stem = path_citra.stem
     try:
         val = float(stem.split("_")[-1])
@@ -54,7 +52,7 @@ def _ekstrak_t_frame(path_citra: Path, indeks: int, t_awal: float) -> float:
 
 
 def _muat_dari_kamera(sesi_dir: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Muat urutan 10 frame dari sesi simulasi/meja yang memiliki folder kamera/."""
+    """Muat urutan 10 frame dari sesi meja yang memiliki folder kamera/."""
     kamera_dir = sesi_dir / "kamera"
     df_akt = pd.read_csv(sesi_dir / "aktuator.csv")
     df_kipas = df_akt[df_akt["nama"] == "kipas"].sort_values("t_host").reset_index(drop=True)
@@ -85,7 +83,6 @@ def _muat_dari_kamera(sesi_dir: Path) -> tuple[np.ndarray, np.ndarray, np.ndarra
         duty_persen = (float(row["nilai"]) / 255.0) * 100.0
 
         idx_kondisi = np.where((frame_times >= t_mulai) & (frame_times < t_selesai))[0]
-        # Aturan 1: Buang 1 detik pertama (10 frame awal) setiap kondisi
         idx_stabil = idx_kondisi[BUANG_AWAL_FRAME:]
 
         n_jendela = len(idx_stabil) // PANJANG_URUTAN
@@ -93,7 +90,7 @@ def _muat_dari_kamera(sesi_dir: Path) -> tuple[np.ndarray, np.ndarray, np.ndarra
             potongan_idx = idx_stabil[j * PANJANG_URUTAN : (j + 1) * PANJANG_URUTAN]
             urutan = np.stack(
                 [_baca_dan_potong_frame(daftar_frame[k]) for k in potongan_idx], axis=0
-            )  # (10, 64, 64)
+            )
             X_list.append(urutan)
             y_list.append(duty_persen)
             grup_list.append(int(ulangan_id))
@@ -102,8 +99,6 @@ def _muat_dari_kamera(sesi_dir: Path) -> tuple[np.ndarray, np.ndarray, np.ndarra
         raise ValueError("Tidak ada jendela 10 frame valid setelah pembuangan 1 detik awal.")
 
     grup = np.asarray(grup_list, dtype=np.int64)
-    # Bila sesi hanya punya < 3 kejadian aktuator (mis. rekaman dasar tim 0),
-    # bagi per blok 4 jendela (1 ulangan setara 1 kondisi 5 detik)
     if len(np.unique(grup)) < 3:
         grup = np.arange(len(X_list), dtype=np.int64) // 4
 
@@ -111,6 +106,53 @@ def _muat_dari_kamera(sesi_dir: Path) -> tuple[np.ndarray, np.ndarray, np.ndarra
         np.asarray(X_list, dtype=np.float32),
         np.asarray(y_list, dtype=np.float32),
         grup,
+    )
+
+
+def _muat_dari_simulasi_conditions(sesi_dir: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Muat jadwal kondisi dari simulator meja.py (conditions.csv) menjadi urutan (N, 10, 64, 64)."""
+    df_cond = pd.read_csv(sesi_dir / "conditions.csv")
+    rng = np.random.default_rng(split.SEED_SPLIT)
+
+    yy, xx = np.mgrid[0:UKURAN_CROP[0], 0:UKURAN_CROP[1]].astype(np.float32)
+    cy, cx = (UKURAN_CROP[0] - 1) / 2.0, (UKURAN_CROP[1] - 1) / 2.0
+    theta = np.arctan2(yy - cy, xx - cx)
+    radius = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
+    mask_bilah = (radius >= 4.0) & (radius <= 28.0)
+
+    X_list: list[np.ndarray] = []
+    y_list: list[float] = []
+    grup_list: list[int] = []
+
+    for _, row in df_cond.iterrows():
+        cond_id = int(row["condition_id"])
+        pwm = float(row["fan_pwm"])
+        light = float(row["light_level"]) / 255.0
+        usable_sec = float(row["usable_seconds"])
+        fps = int(round(float(row["fps"])))
+
+        duty_persen = (pwm / 255.0) * 100.0
+        # Kecepatan sudut proporsional terhadap PWM kipas
+        omega = (pwm / 255.0) * 2.5 * np.pi
+        fase_awal = float(rng.uniform(0, 2 * np.pi))
+
+        n_jendela = int(usable_sec * fps) // PANJANG_URUTAN
+        for j in range(n_jendela):
+            frames = np.empty((PANJANG_URUTAN, UKURAN_CROP[0], UKURAN_CROP[1]), dtype=np.float32)
+            for t_idx in range(PANJANG_URUTAN):
+                t = (j * PANJANG_URUTAN + t_idx) / float(fps)
+                pola_bilah = 0.5 + 0.4 * np.cos(3.0 * (theta + fase_awal + omega * t))
+                citra = np.where(mask_bilah, pola_bilah * light, 0.25 * light)
+                noise = rng.normal(0.0, 0.02, size=UKURAN_CROP).astype(np.float32)
+                frames[t_idx] = np.clip(citra + noise, 0.0, 1.0)
+            X_list.append(frames)
+            y_list.append(duty_persen)
+            grup_list.append(cond_id)
+
+    return (
+        np.asarray(X_list, dtype=np.float32),
+        np.asarray(y_list, dtype=np.float32),
+        np.asarray(grup_list, dtype=np.int64),
     )
 
 
@@ -170,7 +212,7 @@ def _muat_data_sensor_fallback(sesi_dir: Path) -> tuple[np.ndarray, np.ndarray, 
 def _pisah_per_ulangan(
     grup: np.ndarray, seed: int = split.SEED_SPLIT
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Aturan 2: Pisahkan latih, validasi, dan uji berdasarkan satuan ulangan."""
+    """Pisahkan latih, validasi, dan uji berdasarkan satuan ulangan."""
     ulangan_unik = np.unique(grup)
     rng = np.random.default_rng(seed)
     acak = rng.permutation(ulangan_unik)
@@ -183,7 +225,6 @@ def _pisah_per_ulangan(
     grup_val = set(acak[n_test : n_test + n_val].tolist())
     grup_train = set(acak[n_test + n_val :].tolist())
 
-    # Verifikasi eksplisit dengan kode bahwa tidak ada ulangan yang bocor antar-split
     assert grup_train.isdisjoint(grup_test), "Kebocoran data: ulangan muncul di latih dan uji!"
     assert grup_train.isdisjoint(grup_val), "Kebocoran data: ulangan muncul di latih dan validasi!"
     assert grup_val.isdisjoint(grup_test), "Kebocoran data: ulangan muncul di validasi dan uji!"
@@ -197,7 +238,7 @@ def _pisah_per_ulangan(
 def _normalisasi_dari_latih(
     X_train: np.ndarray, X_val: np.ndarray, X_test: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Aturan 3: Hitung statistik normalisasi dari data latih saja."""
+    """Hitung statistik normalisasi dari data latih saja."""
     mu = X_train.mean(axis=0, keepdims=True)
     sd = X_train.std(axis=0, keepdims=True) + 1e-6
     return (
@@ -213,6 +254,8 @@ def muat(
     akar_sesi = Path(sesi_dir) if sesi_dir is not None else DATA_DIR
     if (akar_sesi / "kamera").is_dir():
         X, y, grup = _muat_dari_kamera(akar_sesi)
+    elif (akar_sesi / "conditions.csv").is_file():
+        X, y, grup = _muat_dari_simulasi_conditions(akar_sesi)
     else:
         X, y, grup = _muat_data_sensor_fallback(akar_sesi)
 
